@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Control BLE Carro</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      background-color: #121212;
+      color: #fff;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+      touch-action: none;
+    }
+    header {
+      margin-bottom: 10px;
+    }
+    .btn {
+      background-color: #007BFF;
+      color: white;
+      border: none;
+      padding: 20px 40px;
+      font-size: 1.5rem;
+      font-weight: bold;
+      border-radius: 12px;
+      margin: 5px;
+      cursor: pointer;
+      touch-action: none;
+    }
+    .btn:active { background-color: #0056b3; }
+    .btn.pressed { background-color: #0056b3; }
+    .btn-connect { background-color: #28a745; margin-bottom: 20px; }
+    .btn-connect.connected { background-color: #dc3545; }
+    .control-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 100px);
+      grid-template-rows: repeat(3, 100px);
+      gap: 10px;
+      justify-content: center;
+    }
+    .btn-nav { font-size: 2rem; padding: 0; touch-action: none; }
+    #status { color: #aaa; margin-top: 10px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <button id="connectBtn" class="btn btn-connect">Conectar Carro</button>
+  </header>
+
+  <!-- Control de dirección estilo cruceta -->
+  <div class="control-grid">
+    <div></div>
+    <button class="btn btn-nav" data-dir="F">▲</button>
+    <div></div>
+
+    <button class="btn btn-nav" data-dir="L">◀</button>
+    <button class="btn btn-nav" style="background-color:#444;" id="stopBtn">🛑</button>
+    <button class="btn btn-nav" data-dir="R">▶</button>
+
+    <div></div>
+    <button class="btn btn-nav" data-dir="B">▼</button>
+    <div></div>
+  </div>
+
+  <div id="status">Desconectado</div>
+
+  <script>
+    // Registro del Service Worker para funcionamiento Offline
+    // (requiere que el sitio se sirva por HTTPS o localhost)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(function (err) {
+        console.error('No se pudo registrar el service worker:', err);
+      });
+    }
+
+    // ⚠️ IMPORTANTE: estos valores DEBEN coincidir exactamente con los bloques
+    // "Inicializar BLE como", "Crear servicio BLE UUID" y "Crear característica UUID"
+    // que configuraste en el editor de bloques del ESP32. Si cambias uno de un lado,
+    // cambia el otro también.
+    //
+    // Múltiples carros (uno por estudiante/equipo): cada carro debe llamarse
+    // "ESP32-BLE_<algo único>" (ej. "ESP32-BLE_Luis", "ESP32-BLE_Equipo1") en su
+    // bloque "Inicializar BLE como" — todos comparten el prefijo "ESP32-BLE".
+    // Esta página funciona sin cambios para todos: al conectar, el diálogo de
+    // Chrome muestra la lista de carros cercanos con su nombre completo, y cada
+    // quien elige el suyo.
+    //
+    // Para evitar que cada estudiante tenga que buscar su carro en una lista larga
+    // (por ejemplo, con muchos equipos probando en el mismo salón a la vez), se
+    // puede compartir con cada uno un link personalizado agregando "?nombre=" al
+    // final de la URL, por ejemplo:
+    //   https://tuusuario.github.io/turepo/?nombre=ESP32-BLE_Luis
+    // Con eso, esa página en particular solo va a buscar ESE carro puntual.
+    const urlParams = new URLSearchParams(window.location.search);
+    const BLE_DEVICE_NAME_PREFIX = urlParams.get('nombre') || 'ESP32-BLE'; // debe coincidir con el bloque "Inicializar BLE como"
+    const SERVICE_UUID = 0x181A;                // debe ser el mismo UUID del bloque "Crear servicio BLE"
+    const TX_CHARACTERISTIC_UUID = 0x2A6E;      // debe ser el mismo UUID del bloque "Crear característica"
+
+    let deviceBLE = null;
+    let txCharacteristic = null;
+    let currentDir = null; // dirección actualmente presionada, para no reenviar de más
+
+    const connectBtn = document.getElementById('connectBtn');
+    const statusText = document.getElementById('status');
+    const stopBtn = document.getElementById('stopBtn');
+    const dirButtons = document.querySelectorAll('.btn-nav[data-dir]');
+
+    // Muestra a qué carro está apuntando esta página antes de conectar,
+    // para que cada estudiante confirme que es el suyo.
+    statusText.innerText = 'Buscando: ' + BLE_DEVICE_NAME_PREFIX + (BLE_DEVICE_NAME_PREFIX === 'ESP32-BLE' ? ' (cualquiera)' : '');
+
+    connectBtn.addEventListener('click', async () => {
+      if (deviceBLE && deviceBLE.gatt.connected) {
+        deviceBLE.gatt.disconnect();
+        return;
+      }
+
+      if (!navigator.bluetooth) {
+        statusText.innerText = 'Este navegador no soporta Web Bluetooth (usa Chrome/Edge, y HTTPS o localhost).';
+        return;
+      }
+
+      try {
+        statusText.innerText = 'Buscando carro...';
+        deviceBLE = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: BLE_DEVICE_NAME_PREFIX }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        statusText.innerText = 'Conectando al servidor...';
+        const server = await deviceBLE.gatt.connect();
+
+        statusText.innerText = 'Obteniendo servicios...';
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        txCharacteristic = await service.getCharacteristic(TX_CHARACTERISTIC_UUID);
+
+        statusText.innerText = '¡Carro Conectado!';
+        connectBtn.innerText = 'Desconectar';
+        connectBtn.classList.add('connected');
+
+        deviceBLE.addEventListener('gattserverdisconnected', onDisconnected);
+      } catch (error) {
+        console.error(error);
+        statusText.innerText = 'Error de conexión: ' + error.message;
+      }
+    });
+
+    function onDisconnected() {
+      statusText.innerText = 'Desconectado';
+      connectBtn.innerText = 'Conectar Carro';
+      connectBtn.classList.remove('connected');
+      txCharacteristic = null;
+      currentDir = null;
+      clearInterval(repeatIntervalId);
+      repeatIntervalId = null;
+      dirButtons.forEach(b => b.classList.remove('pressed'));
+    }
+
+    // Función que envía los caracteres correspondientes
+    async function sendCmd(command) {
+      if (!txCharacteristic) return;
+      try {
+        const encoder = new TextEncoder();
+        await txCharacteristic.writeValue(encoder.encode(command));
+        console.log('Enviado: ' + command);
+      } catch (error) {
+        console.error('Error enviando comando: ', error);
+      }
+    }
+
+    // ---- Manejo de botones de dirección ----
+    // Usamos addEventListener (en vez de atributos inline) para poder llamar
+    // preventDefault() y evitar que un mismo toque dispare el comando dos veces
+    // (una por el evento touch y otra por el evento mouse "fantasma" que generan
+    // los navegadores móviles después de un touch).
+    let repeatIntervalId = null;
+
+    function press(dir, btn) {
+      currentDir = dir;
+      btn.classList.add('pressed');
+      sendCmd(dir);
+      // El ESP32 tiene un watchdog de seguridad que detiene los motores si no
+      // recibe una escritura BLE nueva en 500ms (para frenar el carro solo si
+      // se pierde la conexión). Como este botón solo envía el comando UNA VEZ
+      // al presionarlo, reenviamos el mismo comando cada 200ms mientras se
+      // mantenga presionado, para que el watchdog no lo confunda con una
+      // desconexión mientras seguís sosteniendo el botón.
+      clearInterval(repeatIntervalId);
+      repeatIntervalId = setInterval(() => sendCmd(dir), 200);
+    }
+
+    function release(btn) {
+      if (currentDir === null) return;
+      currentDir = null;
+      clearInterval(repeatIntervalId);
+      repeatIntervalId = null;
+      btn.classList.remove('pressed');
+      sendCmd('S');
+    }
+
+    dirButtons.forEach(btn => {
+      const dir = btn.dataset.dir;
+
+      btn.addEventListener('touchstart', (e) => { e.preventDefault(); press(dir, btn); }, { passive: false });
+      btn.addEventListener('touchend', (e) => { e.preventDefault(); release(btn); }, { passive: false });
+      // Si el dedo se desliza fuera del botón o el sistema cancela el toque
+      // (llamada entrante, notificación, etc.), igual detenemos el carro.
+      btn.addEventListener('touchcancel', (e) => { e.preventDefault(); release(btn); }, { passive: false });
+
+      btn.addEventListener('mousedown', () => press(dir, btn));
+      btn.addEventListener('mouseup', () => release(btn));
+      // Si se suelta el mouse fuera del botón (arrastrando), igual detenemos.
+      btn.addEventListener('mouseleave', () => release(btn));
+    });
+
+    stopBtn.addEventListener('click', () => {
+      currentDir = null;
+      clearInterval(repeatIntervalId);
+      repeatIntervalId = null;
+      dirButtons.forEach(b => b.classList.remove('pressed'));
+      sendCmd('S');
+    });
+  </script>
+</body>
+</html>
